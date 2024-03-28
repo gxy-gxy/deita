@@ -99,20 +99,20 @@ def rank0_print(*args):
 
 def preprocess(
     sample,
+    tokenizer,
     conv_template = "vicuna-1.1",
 ) -> Dict:
-
-    conv = get_conv_template(conv_template)
-
-    prompt = conv.system + conv.sep + sample["messages"][0]["role"] + ": " + sample["prompt"] + conv.sep
     
     # Apply prompt templates
     chosen_sources = sample["chosen"]
-    chosen_conversations = chosen_sources[1]["role"] + ": " + chosen_sources[1]["content"] + conv.sep2
 
     rejected_sources = sample["rejected"]
-    rejected_conversations = rejected_sources[1]["role"] + ": " + rejected_sources[1]["content"] + conv.sep2
-    
+
+    prompt = tokenizer.apply_chat_template([chosen_sources[0]], tokenize=False)
+    chosen_conversations = tokenizer.apply_chat_template(chosen_sources, tokenize=False)
+    rejected_conversations = tokenizer.apply_chat_template(rejected_sources, tokenize=False)
+
+
     return dict(
         prompt=prompt,
         chosen=chosen_conversations,
@@ -121,6 +121,7 @@ def preprocess(
 
 def make_dpo_dataset(
     data_args: DataArguments,
+    tokenizer=None,
     sanity_check: bool = False
 ) -> Dataset:
     """Load the stack-exchange-paired dataset from Hugging Face and convert it to the necessary format.
@@ -157,19 +158,19 @@ def make_dpo_dataset(
             "json",
             data_files = json_path,
             split = data_split
-        )
+        )['train']
         
     original_columns = dataset.column_names
     
     if sanity_check:
         dataset = dataset.select(range(min(len(dataset), 1000)))
 
-    preprocess_with_template = partial(preprocess, conv_template = conv_template)
+    preprocess_with_template = partial(preprocess, conv_template = conv_template, tokenizer=tokenizer)
     
     return dataset.map(
         preprocess_with_template,
         num_proc=num_proc,
-        remove_columns=original_columns,
+        # remove_columns=original_columns,
     )
 
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: str):
@@ -194,7 +195,8 @@ def train():
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         cache_dir=training_args.cache_dir,
-        use_flash_attention_2 = True
+        use_flash_attention_2 = True, 
+        torch_dtype=torch.bfloat16
     )
     model.config.use_cache = False
     
@@ -214,7 +216,7 @@ def train():
     )
     
     tokenizer.pad_token = tokenizer.unk_token
-    train_dataset = make_dpo_dataset(data_args=data_args)
+    train_dataset = make_dpo_dataset(data_args=data_args, tokenizer=tokenizer)
     
     trainer = DPOTrainer(
         model, model_refer, tokenizer = tokenizer, beta = training_args.beta, args=training_args, train_dataset = train_dataset,
